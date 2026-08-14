@@ -57,6 +57,18 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS filesystem_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                path TEXT NOT NULL,
+                old_path TEXT,
+                new_path TEXT
+            )
+            """
+        )
         connection.commit()
     except sqlite3.Error as error:
         connection.rollback()
@@ -92,3 +104,18 @@ def insert_processing_result(
         )
     except sqlite3.Error as error:
         raise DatabaseError(f"Unable to save processing result: {error}") from error
+
+
+def insert_filesystem_event(connection: sqlite3.Connection, event: dict[str, Any]) -> int:
+    """Persist one normalized filesystem event in the current transaction."""
+    try:
+        cursor = connection.execute(
+            """
+            INSERT INTO filesystem_events (timestamp, event_type, path, old_path, new_path)
+            VALUES (:timestamp, :event_type, :path, :old_path, :new_path)
+            """,
+            event,
+        )
+        return int(cursor.lastrowid)
+    except sqlite3.Error as error:
+        raise DatabaseError(f"Unable to save filesystem event: {error}") from error

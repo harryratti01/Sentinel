@@ -4,10 +4,13 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from core.cli import run
-from core.database import DatabaseError, connect
+from core.database import DatabaseError, connect, insert_filesystem_event
+from core.events import normalize_event
+from core.watcher import _SentinelEventHandler
 
 
 class SentinelWorkflowTest(unittest.TestCase):
@@ -82,6 +85,66 @@ class SentinelWorkflowTest(unittest.TestCase):
                 )
             finally:
                 connection.close()
+
+    def test_normalizes_and_persists_a_moved_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database_file = Path(temporary_directory) / "sentinel.db"
+            event = normalize_event(
+                "MOVED",
+                r"C:\monitored\renamed.txt",
+                old_path=r"C:\monitored\original.txt",
+                new_path=r"C:\monitored\renamed.txt",
+            )
+
+            connection = connect(database_file)
+            try:
+                with connection:
+                    event_id = insert_filesystem_event(connection, event)
+            finally:
+                connection.close()
+
+            self.assertIsNone(event["event_id"])
+            self.assertIsInstance(event["timestamp"], str)
+            self.assertEqual(event["event_type"], "MOVED")
+            connection = sqlite3.connect(database_file)
+            try:
+                saved_event = connection.execute(
+                    "SELECT event_id, event_type, path, old_path, new_path "
+                    "FROM filesystem_events WHERE event_id = ?",
+                    (event_id,),
+                ).fetchone()
+            finally:
+                connection.close()
+
+            self.assertEqual(
+                saved_event,
+                (
+                    event_id,
+                    "MOVED",
+                    r"C:\monitored\renamed.txt",
+                    r"C:\monitored\original.txt",
+                    r"C:\monitored\renamed.txt",
+                ),
+            )
+
+    def test_watcher_normalizes_all_supported_event_types(self) -> None:
+        events: list[dict[str, object]] = []
+        handler = _SentinelEventHandler(events.append)
+
+        handler.on_created(SimpleNamespace(src_path=r"C:\monitored\created.txt"))
+        handler.on_modified(SimpleNamespace(src_path=r"C:\monitored\modified.txt"))
+        handler.on_deleted(SimpleNamespace(src_path=r"C:\monitored\deleted.txt"))
+        handler.on_moved(
+            SimpleNamespace(
+                src_path=r"C:\monitored\original.txt",
+                dest_path=r"C:\monitored\renamed.txt",
+            )
+        )
+
+        self.assertEqual([event["event_type"] for event in events], ["CREATED", "MODIFIED", "DELETED", "MOVED"])
+        self.assertEqual(events[3]["path"], r"C:\monitored\renamed.txt")
+        self.assertEqual(events[3]["old_path"], r"C:\monitored\original.txt")
+        self.assertEqual(events[3]["new_path"], r"C:\monitored\renamed.txt")
 
 
 if __name__ == "__main__":

@@ -4,9 +4,16 @@ import argparse
 import sqlite3
 from pathlib import Path
 
-from .database import DatabaseError, connect, insert_file, insert_processing_result
+from .database import (
+    DatabaseError,
+    connect,
+    insert_file,
+    insert_filesystem_event,
+    insert_processing_result,
+)
 from .ingestion import IngestionError, ingest_text_file
 from .processor import analyze_text
+from .watcher import WatcherError, watch_directory
 
 
 def run(file_path: str | Path, database_path: str | Path | None = None) -> tuple[int, dict[str, object] | None]:
@@ -27,10 +34,42 @@ def run(file_path: str | Path, database_path: str | Path | None = None) -> tuple
         return 1, None
 
 
+def persist_and_print_event(event: dict[str, object]) -> None:
+    """Persist a watcher event and immediately display its normalized form."""
+    connection = connect()
+    try:
+        with connection:
+            event_id = insert_filesystem_event(connection, event)
+    finally:
+        connection.close()
+
+    event["event_id"] = event_id
+    print(
+        f"Event {event['event_id']}: {event['timestamp']} {event['event_type']} "
+        f"path={event['path']} old_path={event['old_path']} new_path={event['new_path']}"
+    )
+
+
+def monitor(directory: str | Path) -> int:
+    """Run directory monitoring until the user interrupts it."""
+    try:
+        watch_directory(directory, persist_and_print_event)
+        return 0
+    except (WatcherError, DatabaseError, sqlite3.Error) as error:
+        print(f"Sentinel error: {error}")
+        return 1
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Process a local UTF-8 text file with Sentinel.")
-    parser.add_argument("file", help="Path to the text file to process")
+    parser = argparse.ArgumentParser(description="Process a text file or monitor a directory with Sentinel.")
+    parser.add_argument("file", nargs="?", help="Path to the text file to process")
+    parser.add_argument("--watch", metavar="DIRECTORY", help="Continuously monitor a directory")
     args = parser.parse_args()
+
+    if args.watch:
+        return monitor(args.watch)
+    if not args.file:
+        parser.error("provide a file to process or use --watch DIRECTORY")
 
     file_id, result = run(args.file)
     if result is None:
