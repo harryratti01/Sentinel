@@ -11,6 +11,7 @@ from .database import (
     insert_filesystem_event,
     insert_processing_result,
 )
+from .acceptance import run_acceptance_demo
 from .ingestion import IngestionError, ingest_text_file
 from .processor import analyze_text
 from .watcher import WatcherError, watch_directory
@@ -64,8 +65,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Process a text file or monitor a directory with Sentinel.")
     parser.add_argument("file", nargs="?", help="Path to the text file to process")
     parser.add_argument("--watch", metavar="DIRECTORY", help="Continuously monitor a directory")
+    parser.add_argument(
+        "--acceptance-demo",
+        action="store_true",
+        help="Run the deterministic baseline/reconciliation acceptance scenario",
+    )
     args = parser.parse_args()
 
+    if args.acceptance_demo:
+        run_acceptance_demo()
+        return 0
     if args.watch:
         return monitor(args.watch)
     if not args.file:
