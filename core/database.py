@@ -40,6 +40,51 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS protected_targets (
+                target_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                path TEXT NOT NULL,
+                path_key TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS protection_baselines (
+                baseline_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_id INTEGER NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (target_id) REFERENCES protected_targets(target_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS baseline_files (
+                baseline_file_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                baseline_id INTEGER NOT NULL,
+                path TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                file_identity TEXT NOT NULL,
+                modified_time_ns INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                FOREIGN KEY (baseline_id) REFERENCES protection_baselines(baseline_id)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_protected_targets_path_key "
+            "ON protected_targets(path_key)"
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_active_protected_target "
+            "ON protected_targets(path_key) WHERE status = 'ACTIVE'"
+        )
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(files)")}
         if "content" not in columns:
             connection.execute("ALTER TABLE files ADD COLUMN content TEXT")
@@ -119,3 +164,57 @@ def insert_filesystem_event(connection: sqlite3.Connection, event: dict[str, Any
         return int(cursor.lastrowid)
     except sqlite3.Error as error:
         raise DatabaseError(f"Unable to save filesystem event: {error}") from error
+
+
+def insert_protected_target(connection: sqlite3.Connection, target: dict[str, Any]) -> int:
+    try:
+        cursor = connection.execute(
+            """
+            INSERT INTO protected_targets (path, path_key, target_type, status, created_at)
+            VALUES (:path, :path_key, :target_type, :status, :created_at)
+            """,
+            target,
+        )
+        return int(cursor.lastrowid)
+    except sqlite3.Error as error:
+        raise DatabaseError(f"Unable to save protected target: {error}") from error
+
+
+def insert_protection_baseline(connection: sqlite3.Connection, target_id: int, created_at: str) -> int:
+    try:
+        cursor = connection.execute(
+            "INSERT INTO protection_baselines (target_id, created_at) VALUES (?, ?)",
+            (target_id, created_at),
+        )
+        return int(cursor.lastrowid)
+    except sqlite3.Error as error:
+        raise DatabaseError(f"Unable to save protection baseline: {error}") from error
+
+
+def insert_baseline_files(
+    connection: sqlite3.Connection, baseline_id: int, files: list[dict[str, Any]]
+) -> None:
+    try:
+        connection.executemany(
+            """
+            INSERT INTO baseline_files
+                (baseline_id, path, relative_path, sha256, file_identity, modified_time_ns, size)
+            VALUES
+                (:baseline_id, :path, :relative_path, :sha256, :file_identity, :modified_time_ns, :size)
+            """,
+            [{"baseline_id": baseline_id, **file_data} for file_data in files],
+        )
+    except sqlite3.Error as error:
+        raise DatabaseError(f"Unable to save baseline files: {error}") from error
+
+
+def active_protected_target(connection: sqlite3.Connection, path_key: str) -> sqlite3.Row | None:
+    return connection.execute(
+        "SELECT * FROM protected_targets WHERE path_key = ? AND status = 'ACTIVE'", (path_key,)
+    ).fetchone()
+
+
+def list_protected_targets(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+    return connection.execute(
+        "SELECT target_id, path, target_type, status, created_at FROM protected_targets ORDER BY target_id"
+    ).fetchall()

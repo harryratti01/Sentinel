@@ -24,15 +24,30 @@ def scan_directory(directory: str | Path) -> dict[str, Any]:
     root = Path(directory).resolve()
     if not root.is_dir():
         raise ValueError(f"Directory not found: {root}")
+    symlinks = [path for path in root.rglob("*") if path.is_symlink()]
+    if symlinks:
+        raise ValueError(f"Refusing to baseline symlink or junction: {symlinks[0]}")
     return {
         "root": str(root),
         "files": [_file_record(path, root) for path in sorted(root.rglob("*")) if path.is_file()],
     }
 
 
+def scan_target(target: str | Path) -> dict[str, Any]:
+    """Scan one directory or one regular file without following symlinks."""
+    path = Path(target).expanduser().resolve(strict=True)
+    if path.is_symlink():
+        raise ValueError(f"Refusing to baseline symlink or junction: {path}")
+    if path.is_dir():
+        return scan_directory(path)
+    if path.is_file():
+        return {"root": str(path.parent), "files": [_file_record(path, path.parent)]}
+    raise ValueError(f"Target is not a file or directory: {path}")
+
+
 def create_baseline(directory: str | Path) -> dict[str, Any]:
     """Capture a trusted baseline for a directory's current files."""
-    baseline = scan_directory(directory)
+    baseline = scan_target(directory)
     baseline["created_at"] = datetime.now(timezone.utc).isoformat()
     return baseline
 

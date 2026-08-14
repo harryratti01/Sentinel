@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 from .baseline import create_baseline, reconcile, scan_directory
+from .protection import create_protection, inspect_target
 
 
 def run_acceptance_demo() -> None:
@@ -37,3 +38,25 @@ def run_acceptance_demo() -> None:
         print("Evidence:")
         for item in finding["evidence"]:
             print(f"- {item}")
+
+
+def run_protection_demo() -> None:
+    """Create a real temporary protected target using the normal protection flow."""
+    with tempfile.TemporaryDirectory(prefix="sentinel-protection-") as temporary_directory:
+        directory = Path(temporary_directory) / "important"
+        directory.mkdir()
+        (directory / "important.txt").write_text("trusted content\n", encoding="utf-8")
+        nested = directory / "archive"
+        nested.mkdir()
+        (nested / "records.txt").write_text("records\n", encoding="utf-8")
+        database_path = Path(temporary_directory) / "sentinel.db"
+        summary = inspect_target(directory)
+        print(f"Target: {summary['path']}")
+        print(f"Files discovered: {summary['file_count']}")
+        print("User confirmation: yes")
+        protection = create_protection(directory, confirmed=True, database_path=database_path)
+        assert protection is not None
+        print(f"Protection ID: {protection['target_id']}")
+        print(f"Baseline association: {protection['baseline_id']}")
+        print(f"Number of baseline files: {protection['baseline_files']}")
+        print(f"Protection status: {protection['status']}")

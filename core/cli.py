@@ -11,9 +11,10 @@ from .database import (
     insert_filesystem_event,
     insert_processing_result,
 )
-from .acceptance import run_acceptance_demo
+from .acceptance import run_acceptance_demo, run_protection_demo
 from .ingestion import IngestionError, ingest_text_file
 from .processor import analyze_text
+from .protection import ProtectionError, create_protection, inspect_target, protections
 from .watcher import WatcherError, watch_directory
 
 
@@ -61,22 +62,76 @@ def monitor(directory: str | Path) -> int:
         return 1
 
 
+def protect(target: str | Path) -> int:
+    """Display a target summary and require explicit confirmation before protection."""
+    try:
+        summary = inspect_target(target)
+        print(f"Target: {summary['path']}")
+        print(f"Type: {summary['target_type']}")
+        print(f"Files to protect: {summary['file_count']}")
+        print(f"Total size: {summary['total_size']} bytes")
+        answer = input("Create trusted baseline and begin protection? [y/N]: ")
+        protection = create_protection(target, answer.strip().casefold() in {"y", "yes"})
+        if protection is None:
+            print("Protection not created.")
+            return 0
+        print(f"Protection ID: {protection['target_id']}")
+        print(f"Baseline ID: {protection['baseline_id']}")
+        print(f"Protection status: {protection['status']}")
+        return 0
+    except ProtectionError as error:
+        print(f"Sentinel error: {error}")
+        return 1
+
+
+def show_protections() -> int:
+    try:
+        targets = protections()
+    except ProtectionError as error:
+        print(f"Sentinel error: {error}")
+        return 1
+    if not targets:
+        print("No protected targets.")
+        return 0
+    for target in targets:
+        print(
+            f"{target['target_id']}: {target['path']} "
+            f"{target['target_type']} {target['status']} {target['created_at']}"
+        )
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Process a text file or monitor a directory with Sentinel.")
     parser.add_argument("file", nargs="?", help="Path to the text file to process")
+    parser.add_argument("target", nargs="?", help=argparse.SUPPRESS)
     parser.add_argument("--watch", metavar="DIRECTORY", help="Continuously monitor a directory")
     parser.add_argument(
         "--acceptance-demo",
         action="store_true",
         help="Run the deterministic baseline/reconciliation acceptance scenario",
     )
+    parser.add_argument(
+        "--protection-demo",
+        action="store_true",
+        help="Run the deterministic protection-management acceptance scenario",
+    )
     args = parser.parse_args()
 
     if args.acceptance_demo:
         run_acceptance_demo()
         return 0
+    if args.protection_demo:
+        run_protection_demo()
+        return 0
     if args.watch:
         return monitor(args.watch)
+    if args.file == "protect":
+        if not args.target:
+            parser.error("protect requires a target path")
+        return protect(args.target)
+    if args.file == "protections":
+        return show_protections()
     if not args.file:
         parser.error("provide a file to process or use --watch DIRECTORY")
 
