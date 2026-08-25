@@ -11,7 +11,8 @@ from .database import (
     insert_filesystem_event,
     insert_processing_result,
 )
-from .acceptance import run_acceptance_demo, run_protection_demo
+from .acceptance import run_acceptance_demo, run_protection_demo, run_monitor_demo
+from .monitoring import MonitoringCoordinator
 from .ingestion import IngestionError, ingest_text_file
 from .processor import analyze_text
 from .protection import ProtectionError, create_protection, inspect_target, protections
@@ -56,6 +57,16 @@ def monitor(directory: str | Path) -> int:
     """Run directory monitoring until the user interrupts it."""
     try:
         watch_directory(directory, persist_and_print_event)
+        return 0
+    except (WatcherError, DatabaseError, sqlite3.Error) as error:
+        print(f"Sentinel error: {error}")
+        return 1
+
+
+def monitor_protected_targets() -> int:
+    """Continuously monitor all ACTIVE protected targets."""
+    try:
+        MonitoringCoordinator().run_forever()
         return 0
     except (WatcherError, DatabaseError, sqlite3.Error) as error:
         print(f"Sentinel error: {error}")
@@ -116,6 +127,7 @@ def main() -> int:
         action="store_true",
         help="Run the deterministic protection-management acceptance scenario",
     )
+    parser.add_argument("--monitor-demo", action="store_true", help="Run the monitoring acceptance demo")
     args = parser.parse_args()
 
     if args.acceptance_demo:
@@ -123,6 +135,9 @@ def main() -> int:
         return 0
     if args.protection_demo:
         run_protection_demo()
+        return 0
+    if args.monitor_demo:
+        run_monitor_demo()
         return 0
     if args.watch:
         return monitor(args.watch)
@@ -132,6 +147,8 @@ def main() -> int:
         return protect(args.target)
     if args.file == "protections":
         return show_protections()
+    if args.file == "monitor":
+        return monitor_protected_targets()
     if not args.file:
         parser.error("provide a file to process or use --watch DIRECTORY")
 

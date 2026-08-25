@@ -85,6 +85,26 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_active_protected_target "
             "ON protected_targets(path_key) WHERE status = 'ACTIVE'"
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS security_findings (
+                finding_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_id INTEGER NOT NULL,
+                detected_at TEXT NOT NULL,
+                finding_type TEXT NOT NULL,
+                current_path TEXT,
+                previous_path TEXT,
+                confidence TEXT NOT NULL,
+                evidence TEXT NOT NULL,
+                signature TEXT NOT NULL,
+                FOREIGN KEY (target_id) REFERENCES protected_targets(target_id)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_security_findings_target "
+            "ON security_findings(target_id, finding_id)"
+        )
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(files)")}
         if "content" not in columns:
             connection.execute("ALTER TABLE files ADD COLUMN content TEXT")
@@ -218,3 +238,51 @@ def list_protected_targets(connection: sqlite3.Connection) -> list[sqlite3.Row]:
     return connection.execute(
         "SELECT target_id, path, target_type, status, created_at FROM protected_targets ORDER BY target_id"
     ).fetchall()
+
+
+def active_protected_targets(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+    return connection.execute(
+        """
+        SELECT protected_targets.target_id, path, target_type, status,
+               protected_targets.created_at, baseline_id,
+               protection_baselines.created_at AS baseline_created
+        FROM protected_targets
+        JOIN protection_baselines USING (target_id)
+        WHERE status = 'ACTIVE'
+        ORDER BY protected_targets.target_id
+        """
+    ).fetchall()
+
+
+def load_baseline_files(connection: sqlite3.Connection, baseline_id: int) -> list[sqlite3.Row]:
+    return connection.execute(
+        "SELECT path, relative_path, sha256, file_identity, modified_time_ns, size "
+        "FROM baseline_files WHERE baseline_id = ? ORDER BY baseline_file_id",
+        (baseline_id,),
+    ).fetchall()
+
+
+def insert_security_finding(connection: sqlite3.Connection, finding: dict[str, Any]) -> int:
+    try:
+        cursor = connection.execute(
+            """
+            INSERT INTO security_findings
+                (target_id, detected_at, finding_type, current_path, previous_path,
+                 confidence, evidence, signature)
+            VALUES (:target_id, :detected_at, :finding_type, :current_path, :previous_path,
+                    :confidence, :evidence, :signature)
+            """,
+            finding,
+        )
+        return int(cursor.lastrowid)
+    except sqlite3.Error as error:
+        raise DatabaseError(f"Unable to save security finding: {error}") from error
+
+
+def list_security_findings(connection: sqlite3.Connection, target_id: int | None = None) -> list[sqlite3.Row]:
+    query = "SELECT * FROM security_findings"
+    parameters: tuple[Any, ...] = ()
+    if target_id is not None:
+        query += " WHERE target_id = ?"
+        parameters = (target_id,)
+    return connection.execute(query + " ORDER BY finding_id", parameters).fetchall()
