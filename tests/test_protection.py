@@ -3,11 +3,29 @@
 import sqlite3
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from core.database import DatabaseError
-from core.protection import ProtectionError, create_protection, inspect_target, protections
+from core.cli import main as cli_main
+from core.database import (
+    DatabaseError,
+    connect,
+    insert_evidence_observation,
+    insert_security_finding,
+    list_evidence_observations,
+    list_security_findings,
+)
+from core.monitoring import MonitoringCoordinator
+from core.protection import (
+    ProtectionError,
+    create_protection,
+    disable_protection,
+    enable_protection,
+    inspect_target,
+    protections,
+)
 
 
 class ProtectionIntegrationTest(unittest.TestCase):
@@ -82,3 +100,96 @@ class ProtectionIntegrationTest(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM protection_baselines").fetchone()[0], 0)
             finally:
                 connection.close()
+
+    def test_disable_enable_preserves_baseline_findings_and_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            target = self._directory_with_files(directory)
+            database = directory / "sentinel.db"
+            protection = create_protection(target, True, database)
+            assert protection
+            connection = connect(database)
+            try:
+                with connection:
+                    insert_evidence_observation(connection, {
+                        "target_id": protection["target_id"], "observed_at": "now", "event_type": "MODIFIED",
+                        "path": str(target / "one.txt"), "old_path": None, "new_path": None,
+                        "file_identity": None, "sha256": None, "size": None, "modified_time_ns": None,
+                    })
+                    insert_security_finding(connection, {
+                        "target_id": protection["target_id"], "detected_at": "now", "finding_type": "MODIFIED",
+                        "current_path": str(target / "one.txt"), "previous_path": str(target / "one.txt"),
+                        "confidence": "HIGH", "evidence": "[]", "signature": "test-finding",
+                    })
+                baseline_before = [tuple(row) for row in connection.execute(
+                    "SELECT path, relative_path, sha256, file_identity, modified_time_ns, size "
+                    "FROM baseline_files ORDER BY baseline_file_id"
+                )]
+            finally:
+                connection.close()
+
+            self.assertEqual(disable_protection(protection["target_id"], database)["status"], "DISABLED")
+            self.assertEqual(disable_protection(protection["target_id"], database)["status"], "DISABLED")
+            disabled_monitor = MonitoringCoordinator(database)
+            try:
+                self.assertEqual(disabled_monitor.start(), 0)
+            finally:
+                disabled_monitor.stop()
+            self.assertEqual(enable_protection(protection["target_id"], database)["status"], "ACTIVE")
+            self.assertEqual(enable_protection(protection["target_id"], database)["status"], "ACTIVE")
+            enabled_monitor = MonitoringCoordinator(database)
+            try:
+                self.assertEqual(enabled_monitor.start(), 1)
+                self.assertEqual(enabled_monitor.monitored_target_ids, {protection["target_id"]})
+            finally:
+                enabled_monitor.stop()
+
+            connection = connect(database)
+            try:
+                self.assertEqual([tuple(row) for row in connection.execute(
+                    "SELECT path, relative_path, sha256, file_identity, modified_time_ns, size "
+                    "FROM baseline_files ORDER BY baseline_file_id"
+                )], baseline_before)
+                self.assertEqual(len(list_evidence_observations(connection, protection["target_id"])), 1)
+                self.assertEqual(len(list_security_findings(connection, protection["target_id"])), 1)
+            finally:
+                connection.close()
+
+    def test_invalid_protection_id_is_clear_and_status_failure_rolls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            target = self._directory_with_files(directory)
+            database = directory / "sentinel.db"
+            protection = create_protection(target, True, database)
+            assert protection
+
+            with self.assertRaisesRegex(ProtectionError, "Protection ID not found: 999"):
+                disable_protection(999, database)
+            with patch(
+                "core.protection.update_protected_target_status",
+                side_effect=DatabaseError("simulated status update failure"),
+            ), self.assertRaisesRegex(ProtectionError, "simulated status update failure"):
+                disable_protection(protection["target_id"], database)
+
+            connection = connect(database)
+            try:
+                self.assertEqual(connection.execute(
+                    "SELECT status FROM protected_targets WHERE target_id = ?", (protection["target_id"],)
+                ).fetchone()[0], "ACTIVE")
+            finally:
+                connection.close()
+
+    def test_cli_disable_and_enable_commands_dispatch_by_protection_id(self) -> None:
+        with patch("sys.argv", ["sentinel", "disable", "7"]), patch(
+            "core.cli.disable_protection",
+            return_value={"target_id": 7, "status": "DISABLED"},
+        ) as disable_target, redirect_stdout(StringIO()):
+            self.assertEqual(cli_main(), 0)
+        disable_target.assert_called_once_with(7)
+
+        with patch("sys.argv", ["sentinel", "enable", "7"]), patch(
+            "core.cli.enable_protection",
+            return_value={"target_id": 7, "status": "ACTIVE"},
+        ) as enable_target, redirect_stdout(StringIO()):
+            self.assertEqual(cli_main(), 0)
+        enable_target.assert_called_once_with(7)

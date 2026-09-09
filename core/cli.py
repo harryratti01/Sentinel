@@ -15,7 +15,14 @@ from .acceptance import run_acceptance_demo, run_protection_demo, run_monitor_de
 from .monitoring import MonitoringCoordinator
 from .ingestion import IngestionError, ingest_text_file
 from .processor import analyze_text
-from .protection import ProtectionError, create_protection, inspect_target, protections
+from .protection import (
+    ProtectionError,
+    create_protection,
+    disable_protection,
+    enable_protection,
+    inspect_target,
+    protections,
+)
 from .watcher import WatcherError, watch_directory
 
 
@@ -112,6 +119,26 @@ def show_protections() -> int:
     return 0
 
 
+def disable(protection_id: int) -> int:
+    try:
+        target = disable_protection(protection_id)
+    except ProtectionError as error:
+        print(f"Sentinel error: {error}")
+        return 1
+    print(f"Protection ID {target['target_id']} disabled.")
+    return 0
+
+
+def enable(protection_id: int) -> int:
+    try:
+        target = enable_protection(protection_id)
+    except ProtectionError as error:
+        print(f"Sentinel error: {error}")
+        return 1
+    print(f"Protection ID {target['target_id']} enabled.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Process a text file or monitor a directory with Sentinel.")
     parser.add_argument("file", nargs="?", help="Path to the text file to process")
@@ -147,6 +174,16 @@ def main() -> int:
         return protect(args.target)
     if args.file == "protections":
         return show_protections()
+    if args.file in {"disable", "enable"}:
+        if not args.target:
+            parser.error(f"{args.file} requires a protection ID")
+        try:
+            protection_id = int(args.target)
+        except ValueError:
+            parser.error("protection ID must be an integer")
+        if protection_id <= 0:
+            parser.error("protection ID must be a positive integer")
+        return disable(protection_id) if args.file == "disable" else enable(protection_id)
     if args.file == "monitor":
         return monitor_protected_targets()
     if not args.file:

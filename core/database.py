@@ -105,6 +105,42 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_security_findings_target "
             "ON security_findings(target_id, finding_id)"
         )
+        # M6 evidence is deliberately additive.  M2's filesystem_events remains
+        # an unscoped watcher log; these records retain the target association and
+        # capture-time snapshot needed to investigate protected-target history.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS evidence_observations (
+                observation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_id INTEGER NOT NULL,
+                observed_at TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                path TEXT NOT NULL,
+                old_path TEXT,
+                new_path TEXT,
+                file_identity TEXT,
+                sha256 TEXT,
+                size INTEGER,
+                modified_time_ns INTEGER,
+                FOREIGN KEY (target_id) REFERENCES protected_targets(target_id)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_evidence_observations_target "
+            "ON evidence_observations(target_id, observation_id)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS finding_observations (
+                finding_id INTEGER NOT NULL,
+                observation_id INTEGER NOT NULL,
+                PRIMARY KEY (finding_id, observation_id),
+                FOREIGN KEY (finding_id) REFERENCES security_findings(finding_id),
+                FOREIGN KEY (observation_id) REFERENCES evidence_observations(observation_id)
+            )
+            """
+        )
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(files)")}
         if "content" not in columns:
             connection.execute("ALTER TABLE files ADD COLUMN content TEXT")
@@ -240,6 +276,26 @@ def list_protected_targets(connection: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def update_protected_target_status(
+    connection: sqlite3.Connection, target_id: int, status: str
+) -> sqlite3.Row | None:
+    """Update one existing protected target's status in the caller's transaction."""
+    try:
+        cursor = connection.execute(
+            "UPDATE protected_targets SET status = ? WHERE target_id = ?",
+            (status, target_id),
+        )
+        if cursor.rowcount != 1:
+            return None
+        return connection.execute(
+            "SELECT target_id, path, target_type, status, created_at "
+            "FROM protected_targets WHERE target_id = ?",
+            (target_id,),
+        ).fetchone()
+    except sqlite3.Error as error:
+        raise DatabaseError(f"Unable to update protected target status: {error}") from error
+
+
 def active_protected_targets(connection: sqlite3.Connection) -> list[sqlite3.Row]:
     return connection.execute(
         """
@@ -277,6 +333,82 @@ def insert_security_finding(connection: sqlite3.Connection, finding: dict[str, A
         return int(cursor.lastrowid)
     except sqlite3.Error as error:
         raise DatabaseError(f"Unable to save security finding: {error}") from error
+
+
+def insert_evidence_observation(connection: sqlite3.Connection, observation: dict[str, Any]) -> int:
+    """Persist one target-scoped normalized watcher observation."""
+    try:
+        cursor = connection.execute(
+            """
+            INSERT INTO evidence_observations
+                (target_id, observed_at, event_type, path, old_path, new_path,
+                 file_identity, sha256, size, modified_time_ns)
+            VALUES (:target_id, :observed_at, :event_type, :path, :old_path, :new_path,
+                    :file_identity, :sha256, :size, :modified_time_ns)
+            """,
+            observation,
+        )
+        return int(cursor.lastrowid)
+    except sqlite3.Error as error:
+        raise DatabaseError(f"Unable to save evidence observation: {error}") from error
+
+
+def link_finding_observations(
+    connection: sqlite3.Connection, finding_id: int, observation_ids: list[int]
+) -> None:
+    """Link a finding to every persisted observation in its debounce batch."""
+    try:
+        connection.executemany(
+            "INSERT OR IGNORE INTO finding_observations (finding_id, observation_id) VALUES (?, ?)",
+            [(finding_id, observation_id) for observation_id in observation_ids],
+        )
+    except sqlite3.Error as error:
+        raise DatabaseError(f"Unable to link finding evidence: {error}") from error
+
+
+def unlinked_evidence_observation_ids(connection: sqlite3.Connection, target_id: int) -> list[int]:
+    """Return persisted observations not yet associated with a reconciliation finding."""
+    return [
+        int(row["observation_id"])
+        for row in connection.execute(
+            """
+            SELECT observation_id FROM evidence_observations
+            WHERE target_id = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM finding_observations
+                  WHERE finding_observations.observation_id = evidence_observations.observation_id
+              )
+            ORDER BY observation_id
+            """,
+            (target_id,),
+        )
+    ]
+
+
+def finding_ids_for_signatures(
+    connection: sqlite3.Connection, target_id: int, signatures: set[str]
+) -> list[int]:
+    """Find the persisted baseline-relative findings represented by current signatures."""
+    if not signatures:
+        return []
+    placeholders = ", ".join("?" for _ in signatures)
+    return [
+        int(row["finding_id"])
+        for row in connection.execute(
+            f"SELECT finding_id FROM security_findings WHERE target_id = ? AND signature IN ({placeholders})",
+            (target_id, *sorted(signatures)),
+        )
+    ]
+
+
+def list_evidence_observations(
+    connection: sqlite3.Connection, target_id: int
+) -> list[sqlite3.Row]:
+    """Return a deterministic target timeline, ordered by persistent sequence."""
+    return connection.execute(
+        "SELECT * FROM evidence_observations WHERE target_id = ? ORDER BY observation_id",
+        (target_id,),
+    ).fetchall()
 
 
 def list_security_findings(connection: sqlite3.Connection, target_id: int | None = None) -> list[sqlite3.Row]:

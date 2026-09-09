@@ -13,6 +13,7 @@ from .database import (
     insert_protected_target,
     insert_protection_baseline,
     list_protected_targets,
+    update_protected_target_status,
 )
 
 
@@ -82,3 +83,37 @@ def protections(database_path: str | Path | None = None) -> list[dict[str, Any]]
             connection.close()
     except DatabaseError as error:
         raise ProtectionError(str(error)) from error
+
+
+def set_protection_status(
+    protection_id: int, status: str, database_path: str | Path | None = None
+) -> dict[str, Any]:
+    """Enable or disable an existing protection without changing its baseline or history."""
+    if status not in {"ACTIVE", "DISABLED"}:
+        raise ValueError(f"Unsupported protection status: {status}")
+    try:
+        connection = connect(database_path)
+        try:
+            with connection:
+                target = update_protected_target_status(connection, protection_id, status)
+                if target is None:
+                    raise ProtectionError(f"Protection ID not found: {protection_id}")
+        finally:
+            connection.close()
+    except DatabaseError as error:
+        raise ProtectionError(str(error)) from error
+    return dict(target)
+
+
+def disable_protection(
+    protection_id: int, database_path: str | Path | None = None
+) -> dict[str, Any]:
+    """Mark an existing protection DISABLED while preserving all associated records."""
+    return set_protection_status(protection_id, "DISABLED", database_path)
+
+
+def enable_protection(
+    protection_id: int, database_path: str | Path | None = None
+) -> dict[str, Any]:
+    """Mark an existing protection ACTIVE using its existing trusted baseline."""
+    return set_protection_status(protection_id, "ACTIVE", database_path)
