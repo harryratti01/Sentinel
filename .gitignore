@@ -38,3 +38,4 @@ htmlcov/
 # Sentinel local data
 data/*
 !data/.gitkeep
+m6_test/
